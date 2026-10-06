@@ -1,0 +1,979 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat Overlay</title>
+<!--
+  TWITCH CHAT OVERLAY  —  OBS Browser Source
+  ------------------------------------------------------------
+  1. Open this page in a browser (the hosted link, or double-click the file).
+     You get a live preview plus a settings panel. Type your channel, pick
+     your options, then press "Copy OBS URL".
+  2. In OBS: Sources > + > Browser. Leave "Local file" UNticked and paste the
+     copied URL into the URL box. Suggested size: 460 x 760.
+  Sharing: host this one file anywhere public (e.g. GitHub Pages). Everyone who
+  opens the link gets the settings panel and builds their own OBS URL.
+
+  Every option can also be typed into the URL by hand (add with &):
+    channel=name        your Twitch channel (no channel = preview + settings panel)
+    side=left           left | right
+    scale=1             overall size multiplier
+    max=12              most messages on screen
+    fade=30             seconds before a message fades (0 = never)
+    hue=19              main colour, 0-359 on the colour wheel (leave out for burnt orange)
+
+    EMOTES
+    emotes=bubble       bubble = solo-emote messages get big emotes in orange circles
+                        inline = emotes always stay text-sized
+                        text   = no emote images, show their names as text
+    emotesize=1         emote size multiplier (inline and big)
+    emotemax=3          big emotes shown before the "+N" counter
+    emotering=1         circle behind big emotes (0 = emotes float on their own)
+    animated=1          animated Twitch emotes (0 = still images)
+    thirdparty=bttv,ffz,7tv   which extra emote sets to load (0 = none)
+
+    EXTRAS
+    typing=0            letters type in one by one (1 = on)
+    badges=1            real Twitch badges, incl. your channel's own sub & bit badges
+    anchor=1            anchor + logo at the end of each boat line
+    logo=https://...    use your own logo image next to the anchor instead of the sailboat
+    bob=1               boats gently bob on the water
+    portholes=1         round portholes on the hull line (0 = plain hull)
+    roles=1             role name on the name tag (Streamer, Head Mod, Mod, VIP, Artist, Founder)
+    headmods=a,b        extra people to show as Head Mod (Twitch's Lead Moderator badge is detected automatically)
+    events=1            show subs, gifted subs and raids
+    hidecmds=1          hide messages that start with "!"
+    bots=nightbot,...   accounts to hide
+
+    MULTISTREAM (optional — YouTube, Kick, etc. alongside Twitch)
+    ssn=SESSION_ID      your Social Stream Ninja session ID (free tool: socialstream.ninja).
+                        In Social Stream Ninja: Global settings > Mechanics > turn on
+                        "Enable remote API control of extension" and "Send chat messages to API server".
+                        Twitch still comes in directly (badges, emotes, alerts); its copy from
+                        Social Stream Ninja is skipped so nothing shows twice.
+    platformicons=1     small YouTube / Twitch / Kick icon on each name flag (multistream only)
+
+  Reads chat anonymously — no login or token needed.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Manrope:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --scale:1; --es:1;
+    --hull:#b4562a; --hulltext:#f4ecdc; --stripe:#9a4824; --waterline:#1f2a36; --mention:#eaa47c;
+    --cream:#e9dfca; --wood:#5e4129; --flag:#ece3cf; --flagtext:#2a2420;
+  }
+  html,body{margin:0;height:100%;background:transparent!important;overflow:hidden}
+  body.demo{background:var(--previewbg,#56606b)!important}   /* browser preview only — never in OBS */
+  #obsnote{position:absolute;left:12px;top:12px;max-width:340px;padding:10px 12px;border-radius:8px;background:rgba(20,22,26,.85);
+    color:#e8e3d9;font:600 13px/1.45 system-ui,sans-serif}
+  #obsnote b{color:#d3a37a}
+  body{font-size:calc(16px*var(--scale));color:#f4ecdc}
+  #chat{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:flex-end;
+        padding:calc(16px*var(--scale)) calc(18px*var(--scale)) calc(20px*var(--scale));box-sizing:border-box;gap:calc(12px*var(--scale))}
+  body.left  #chat{align-items:flex-start}
+  body.right #chat{align-items:flex-end}
+  body.demo #chat{right:auto;width:min(480px,100%)}
+
+  /* ---------- shared pieces ---------- */
+  .msg{max-width:100%;box-sizing:border-box;overflow-wrap:anywhere}
+  .badges{display:inline-flex;align-items:center;gap:.25em;margin-right:.45em;vertical-align:-.24em}
+  .badges img{height:1.25em;width:auto;display:block}
+  .emote{height:calc(1.75em*var(--es));vertical-align:middle;margin:-.3em .06em}
+  .dot{display:none}
+  .bigemotes{display:flex;align-items:center;flex-wrap:wrap;gap:calc(10px*var(--scale))}
+  .bigemote{--bes:calc(76px*var(--scale)*var(--es));width:var(--bes);height:var(--bes);flex:none;
+            display:grid;place-items:center;animation:pop .45s cubic-bezier(.2,1.5,.4,1) both}
+  .bigemote img{width:80%;height:80%;object-fit:contain}
+  .more{font-weight:800;font-size:.75em;padding:.45em .75em;border-radius:999px;animation:pop .45s .3s both}
+  .ev{display:flex;flex-wrap:wrap;gap:calc(9px*var(--scale));align-items:center}
+  .ev .tag,.ev .info{border-radius:999px;padding:.6em 1.2em;font-weight:800;letter-spacing:.05em;text-transform:uppercase}
+  .ev .tag{white-space:nowrap}
+  .typing .ch,.typing .body .emote{opacity:0;animation:chIn .18s ease forwards}
+  body.ring0 .bigemote{background:transparent!important;box-shadow:none!important}
+  body.ring0 .bigemote img{width:100%;height:100%}
+  @keyframes chIn{to{opacity:1}}
+  @keyframes pop{from{opacity:0;transform:scale(.4)}to{opacity:1;transform:none}}
+
+  .role{display:inline-block;margin-left:.55em;padding:.14em .45em .1em;border-radius:4px;background:var(--rc);color:var(--ri);
+    font-size:.8em;font-weight:800;letter-spacing:.06em;text-transform:uppercase;line-height:1.2;vertical-align:.06em;font-style:normal}
+
+  /* ---------- BOAT LINES: compact one-line chat, each line a little boat ---------- */
+  body.lines{font-family:'Manrope',system-ui,sans-serif;font-weight:700;font-size:calc(19px*var(--scale));color:#f4ecdc;
+    --mention:#eaa47c}
+  body.lines #chat{gap:calc(9px*var(--scale))}
+  /* the message + a slim hull underneath it */
+  body.lines .msg{position:relative;z-index:0;width:fit-content;line-height:1.38;padding:0 calc(6px*var(--scale)) calc(8px*var(--scale)) 0;
+    transform-origin:30% 100%;animation:lineIn .6s cubic-bezier(.2,.9,.3,1) both;
+    text-shadow:0 0 2px rgba(0,0,0,.95),0 1px 2px rgba(0,0,0,.9),1px 1px 0 rgba(0,0,0,.7)}
+  body.lines.bob .msg{animation:lineIn .6s cubic-bezier(.2,.9,.3,1) both,bobLine var(--bobd,4s) ease-in-out .6s infinite}
+  /* the hull under each message — built from the supplied hull asset: cream deck band, orange hull,
+     grey-ringed portholes (always whole), square stern and a slanted bow. Sits in the existing gap, so nothing moves. */
+  body.lines .msg::after{content:"";position:absolute;z-index:-1;box-sizing:border-box;
+    left:calc(-2px*var(--scale));right:calc(-8px*var(--scale));bottom:calc(-1.0px*var(--scale));height:calc(8.0px*var(--scale));
+    padding:0 calc(14.5px*var(--scale)) 0 calc(4.5px*var(--scale));
+    clip-path:polygon(0 0,100% 0,calc(100% - 9.5px*var(--scale)) 100%,0 100%);
+    background:
+      radial-gradient(circle closest-side,#303030 0 68%,#bababa 74% 92%,transparent 100%)
+        0 calc(1.58px*var(--scale)) / calc(31.67px*var(--scale)) calc(5.67px*var(--scale)) space no-repeat content-box,
+      linear-gradient(var(--cream),var(--cream)) 0 0 / 100% calc(1.17px*var(--scale)) no-repeat border-box,
+      var(--hull)}
+  /* the shadow: a dark waterline under the hull and a soft shadow fading below it, following the bow */
+  body.lines .msg::before{content:"";position:absolute;z-index:-1;
+    left:calc(-2px*var(--scale));right:calc(-8px*var(--scale));bottom:calc(-7.0px*var(--scale));height:calc(14.0px*var(--scale));
+    clip-path:polygon(0 0,100% 0,calc(100% - 16.62px*var(--scale)) 100%,0 100%);
+    background:linear-gradient(to bottom,transparent calc(8.0px*var(--scale)),var(--waterline) calc(8.0px*var(--scale)) calc(10.0px*var(--scale)),rgba(0,0,0,.4) calc(10.0px*var(--scale)),transparent 100%)}
+  body.lines.noports .msg::after{background-image:none,linear-gradient(var(--cream),var(--cream))}   /* portholes off */
+  body.lines .msg.anc::before{right:calc(3.75em - 8px*var(--scale))}
+  body.lines .msg.out{animation:lineOut .6s ease-in forwards!important}
+  body.lines.right .msg{text-align:right;padding:0 0 calc(8px*var(--scale)) calc(6px*var(--scale));transform-origin:70% 100%}
+  /* the name = a small parchment flag on a mast */
+  body.lines .name{position:relative;display:inline-block;padding-left:calc(4px*var(--scale));margin-right:.45em;vertical-align:.06em}
+  body.lines .name::before{content:"";position:absolute;left:0;top:-.2em;bottom:-.35em;width:calc(2.5px*var(--scale));border-radius:2px;background:var(--wood);
+    box-shadow:0 0 2px rgba(0,0,0,.6)}
+  body.lines .nm{display:inline-block;background:linear-gradient(to right,var(--uc) 0 .34em,var(--flag) .34em);color:var(--flagtext);
+    font-family:'Barlow Condensed','Arial Narrow',sans-serif;font-weight:600;font-size:.86em;letter-spacing:.08em;text-transform:uppercase;
+    text-shadow:none;line-height:1.25;padding:.1em 1.35em .06em .7em;
+    clip-path:polygon(0 0,100% 0,calc(100% - .62em) 50%,100% 100%,0 100%);transform-origin:0 50%;animation:flutter 2.6s ease-in-out infinite}
+  body.lines.right .name{padding-left:0;padding-right:calc(4px*var(--scale));margin:0 0 0 .45em}
+  body.lines.right .name::before{left:auto;right:0}
+  body.lines.right .nm{background:linear-gradient(to left,var(--uc) 0 .34em,var(--flag) .34em);padding:.1em .7em .06em 1.35em;
+    clip-path:polygon(0 0,100% 0,100% 100%,0 100%,.62em 50%);transform-origin:100% 50%}
+  body.lines .badges{margin-right:.35em;vertical-align:-.2em}
+  .plat{display:inline-flex;vertical-align:-.2em;margin-right:.35em}
+  .plat svg{width:1.1em;height:1.1em;display:block}
+  body.lines .badges img{height:1.15em}
+  body.lines .role{font-size:.82em;letter-spacing:.09em;margin-left:.5em;vertical-align:.05em}
+  body.lines .row,body.lines .body{display:inline}
+  body.lines .action .body{color:var(--uc);font-style:italic}
+  body.lines .mention{color:var(--mention)}
+  /* ---------- alerts: subs, gifts, raids, bits get their own wooden card with an animated drawing ---------- */
+  body.lines .msg.event,body.lines.bob .msg.event{display:flex;align-items:center;gap:.5em;padding:.15em 0;margin:calc(3px*var(--scale)) 0;
+    font-size:.9em;color:#f4ecdc;background:none;box-shadow:none;
+    text-shadow:0 0 2px rgba(0,0,0,.95),0 1px 2px rgba(0,0,0,.9),1px 1px 0 rgba(0,0,0,.7);
+    animation:alertIn .75s cubic-bezier(.2,1.4,.4,1) both}
+  body.lines .msg.event::after,body.lines .msg.event::before{display:none}
+  .evart{flex:none;width:2.5em;height:2.5em;filter:drop-shadow(0 1px 2px rgba(0,0,0,.75))}
+  .evart svg{width:100%;height:100%;display:block;overflow:visible}
+  .evart svg *{transform-box:fill-box}
+  .evtitle{font-family:'Barlow Condensed','Arial Narrow',sans-serif;font-weight:700;font-size:.8em;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--mention);line-height:1.15}
+  .evline{font-weight:700;line-height:1.3}
+  .evname{color:var(--uc)}
+  /* gifted subs: the barrel drops onto the plank and rocks */
+  .ev-gift .evart svg{transform-origin:50% 92%;animation:barrelDrop .9s cubic-bezier(.3,1.5,.5,1) .15s both,barrelRock 2.8s ease-in-out 1.1s infinite}
+  /* raids: the cannons recoil and fire, flash + smoke */
+  .ev-raid .cn{animation:recoil 1.5s ease-out 3}
+  .ev-raid .flash{opacity:0;transform-origin:center;animation:flash 1.5s ease-out 3}
+  .ev-raid .puff{opacity:0;transform-origin:center;animation:puff 1.5s ease-out 3}
+  .ev-raid .b2 .cn,.ev-raid .b2 .flash,.ev-raid .b2 .puff{animation-delay:.45s}
+  .ev-raid .puff.p2{animation-name:puff2}
+  /* subs: the ship's bell swings */
+  .ev-sub .evart svg{transform-origin:50% 6%;animation:bellRing 1.8s ease-out .2s both,bellIdle 3.2s ease-in-out 2s infinite}
+  /* bits: the chest bounces in and sparkles */
+  .ev-bits .evart svg{transform-origin:50% 100%;animation:barrelDrop .8s cubic-bezier(.3,1.5,.5,1) .15s both}
+  .ev-bits .spark{transform-origin:center;animation:spark 1.6s ease-in-out infinite}
+  .ev-bits .spark.s2{animation-delay:.55s}.ev-bits .spark.s3{animation-delay:1.1s}
+  @keyframes alertIn{from{opacity:0;transform:translateY(10px) scale(.92)}to{opacity:1;transform:none}}
+  @keyframes barrelDrop{from{opacity:0;transform:translateY(-1.4em) rotate(-25deg)}to{opacity:1;transform:none}}
+  @keyframes barrelRock{0%,100%{transform:rotate(-3deg)}50%{transform:rotate(3deg)}}
+  @keyframes recoil{0%,100%{transform:none}6%{transform:translateX(3px)}25%{transform:none}}
+  @keyframes flash{0%{opacity:0;transform:scale(.3)}5%{opacity:1;transform:scale(1)}18%{opacity:0;transform:scale(1.3)}100%{opacity:0}}
+  @keyframes puff{0%,4%{opacity:0;transform:translate(0,0) scale(.3)}12%{opacity:.95}60%{opacity:0;transform:translate(-7px,-4px) scale(1.6)}100%{opacity:0}}
+  @keyframes puff2{0%,6%{opacity:0;transform:translate(0,0) scale(.3)}16%{opacity:.8}70%{opacity:0;transform:translate(-10px,3px) scale(1.8)}100%{opacity:0}}
+  @keyframes bellRing{0%{transform:rotate(22deg)}20%{transform:rotate(-16deg)}40%{transform:rotate(10deg)}60%{transform:rotate(-6deg)}80%{transform:rotate(3deg)}100%{transform:none}}
+  @keyframes bellIdle{0%,100%{transform:rotate(-2deg)}50%{transform:rotate(2deg)}}
+  @keyframes spark{0%,100%{opacity:0;transform:scale(.3)}50%{opacity:1;transform:scale(1)}}
+  /* solo emotes: their own look — each emote big inside a solid dark circle, extra ones as a small +N pill */
+  body.lines .emoteonly .name{vertical-align:middle}
+  body.lines .emoteonly .row{display:inline}
+  body.lines .bigemotes{display:inline-flex;vertical-align:middle;align-items:center;gap:calc(8px*var(--scale));padding:.12em 0 .1em}
+  body.lines .bigemote{--bes:calc(3.3em*var(--es));border-radius:50%;background:var(--hull);box-shadow:0 2px 4px rgba(0,0,0,.4)}
+  body.lines .bigemote img{width:84%;height:84%}
+  body.lines .more{background:var(--hull);color:var(--hulltext);text-shadow:none;font-family:'Manrope',system-ui,sans-serif;font-weight:800;
+    font-size:.7em;padding:.4em .7em;letter-spacing:0;box-shadow:0 2px 4px rgba(0,0,0,.35)}
+  @keyframes lineIn{from{opacity:0;transform:translateX(-40px) rotate(-2deg)}to{opacity:1;transform:none}}
+  @keyframes lineOut{to{opacity:0;transform:translateY(14px) rotate(3deg)}}
+  /* anchor + logo at the end of each line — the hull stops just after the words, so they sit clearly apart from the message */
+  body.lines .msg.anc{padding-right:3.75em}
+  body.lines .msg.anc::after{right:calc(3.75em - 8px*var(--scale))}
+  body.lines .anchor{position:absolute;right:.15em;bottom:calc(6px*var(--scale));display:inline-flex;align-items:center;
+    transform-origin:20% 10%;filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.85));text-shadow:none}
+  body.lines .emoteonly .anchor{bottom:calc(6px*var(--scale) + .95em*var(--es))}
+  body.lines.bob .anchor{animation:anchorSwing 3.8s ease-in-out infinite}
+  body.lines .anchor svg{height:1.55em;width:auto;flex:none}
+  body.lines .anchor img{height:1.45em;width:auto;margin-left:.05em}
+  @keyframes anchorSwing{0%,100%{transform:rotate(-2.2deg)}50%{transform:rotate(2.2deg)}}
+  @keyframes flutter{0%,100%{transform:none}50%{transform:skewY(-3deg) scaleX(.96)}}
+  @keyframes bobLine{0%,100%{transform:none}25%{transform:translateY(-1.1px) rotate(-.25deg)}75%{transform:translateY(1.1px) rotate(.25deg)}}
+
+  /* ---------- settings panel (preview mode only) ---------- */
+  #panel{position:fixed;top:12px;right:12px;width:300px;max-height:calc(100vh - 24px);overflow:auto;box-sizing:border-box;
+    background:#1f2328;color:#e8e3d9;font:13px/1.4 system-ui,-apple-system,Segoe UI,sans-serif;font-weight:500;
+    border-radius:14px;padding:14px 16px 16px;box-shadow:0 12px 32px rgba(0,0,0,.35);z-index:10}
+  #panel.hidden{display:none}
+  #panel h2{font-size:15px;margin:0 0 4px;display:flex;justify-content:space-between;align-items:center}
+  #panel p{margin:0 0 6px;color:#a59f95;font-size:12px}
+  #panel fieldset{border:0;border-top:1px solid #353b43;margin:12px 0 0;padding:6px 0 0}
+  #panel legend{font-weight:700;color:#d3a37a;font-size:11px;letter-spacing:.08em;text-transform:uppercase;padding:0 6px 0 0}
+  #panel label{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:7px 0}
+  #panel input[type=text],#panel input[type=number],#panel select{width:140px;box-sizing:border-box;background:#2b3037;border:1px solid #3f4650;color:#fff;border-radius:6px;padding:5px 7px;font:inherit}
+  #panel input[type=range]{width:110px;accent-color:#b4562a}
+  #panel input[type=checkbox]{width:16px;height:16px;accent-color:#b4562a}
+  #panel input[type=color]{width:44px;height:26px;border:0;background:none;padding:0}
+  #panel input.hue{-webkit-appearance:none;appearance:none;width:118px;height:12px;border-radius:999px;margin:0;cursor:pointer;
+    background:linear-gradient(to right,hsl(0 75% 55%),hsl(60 75% 55%),hsl(120 75% 45%),hsl(180 75% 45%),hsl(240 75% 60%),hsl(300 75% 55%),hsl(359 75% 55%))}
+  #panel input.hue::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:#fff;border:3px solid var(--hull);box-shadow:0 1px 4px rgba(0,0,0,.4)}
+  #panel input.hue::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#fff;border:3px solid var(--hull)}
+  #panel .sw{display:inline-block;width:30px;height:16px;border-radius:999px;background:var(--hull);box-shadow:inset 0 0 0 3px var(--mention);flex:none}
+  #panel .link{background:none;border:0;color:#d3a37a;font:600 12px system-ui,sans-serif;cursor:pointer;padding:0;text-decoration:underline}
+  #panel .rv{display:flex;align-items:center;gap:6px}
+  #panel .rv output{width:34px;text-align:right;color:#a59f95;font-variant-numeric:tabular-nums}
+  #panel textarea{width:100%;box-sizing:border-box;height:70px;margin-top:6px;background:#16191d;border:1px solid #3f4650;color:#d6cfc2;border-radius:8px;padding:6px 8px;font:11px/1.4 ui-monospace,Menlo,Consolas,monospace;resize:none}
+  #panel .btn{margin-top:8px;width:100%;background:#b4562a;color:#f4ecdc;border:0;border-radius:8px;padding:9px;font:700 13px system-ui,sans-serif;cursor:pointer}
+  #panel .btn2{background:#3a4049;color:#e8e3d9}
+  #panel .x{background:none;border:0;color:#a59f95;font-size:18px;cursor:pointer;padding:0 2px}
+  #panel .warn{color:#ffcf6b;font-size:12px;margin-top:6px}
+  #gear{position:fixed;top:12px;right:12px;z-index:10;background:#1f2328;color:#e8e3d9;border:0;border-radius:999px;padding:8px 14px;font:700 13px system-ui,sans-serif;cursor:pointer;display:none}
+  #gear.show{display:block}
+</style>
+</head>
+<body>
+<div id="chat"></div>
+
+<script>
+(() => {
+  const P = new URLSearchParams(location.search);
+  const DEFAULT_BOTS = 'nightbot,streamelements,streamlabs,moobot,fossabot,wizebot';
+  const DEF = {
+    side:'left', scale:'1', max:'12', fade:'30',
+    emotes:'bubble', emotesize:'1', emotemax:'3', emotering:'1', animated:'1', thirdparty:'bttv,ffz,7tv',
+    typing:'0', badges:'1', anchor:'1', logo:'', events:'1', bob:'1', portholes:'1', roles:'1', headmods:'', hidecmds:'1', bots:DEFAULT_BOTS, ssn:'', platformicons:'1',
+  };
+  const DEF_BG = '#56606b';
+  const get = k => P.get(k) ?? DEF[k];
+  const on  = k => get(k) !== '0';
+
+  const CHANNEL    = (P.get('channel') || '').toLowerCase().replace(/^#/, '').trim();
+  const SIDE       = get('side') === 'right' ? 'right' : 'left';
+  const SCALE      = parseFloat(get('scale')) || 1;
+  const MAX        = Math.max(1, parseInt(get('max'), 10) || 12);
+  const FADE       = Math.max(0, parseFloat(get('fade')) || 0);
+  const EMOTE_MODE = ['inline','text'].includes(get('emotes')) ? get('emotes') : 'bubble';
+  const EMOTE_SIZE = parseFloat(get('emotesize')) || 1;
+  const EMOTE_MAX  = Math.max(1, parseInt(get('emotemax'), 10) || 3);
+  const ANIMATED   = on('animated');
+  const THIRD      = new Set(get('thirdparty') === '0' ? [] : get('thirdparty').toLowerCase().split(',').map(s => s.trim()));
+  const TYPING     = on('typing');
+  const EVENTS     = on('events');
+  const SSN        = (P.get('ssn') || '').trim();                 // Social Stream Ninja session (multistream)
+  const MULTI      = !!(SSN || P.get('setupssn'));
+  const PLATFORM_ICONS = MULTI && on('platformicons');
+  const ROLE_TAGS  = on('roles');
+  const HIDE_CMDS  = on('hidecmds');
+  const BOTS       = new Set(get('bots').toLowerCase().split(',').map(s => s.trim()).filter(Boolean));
+
+  document.body.classList.add('lines', SIDE);
+  if (!on('emotering')) document.body.classList.add('ring0');
+  if (on('bob')) document.body.classList.add('bob');
+  if (!on('portholes')) document.body.classList.add('noports');
+  document.documentElement.style.setProperty('--scale', SCALE);
+  document.documentElement.style.setProperty('--es', EMOTE_SIZE);
+
+  // ---------- theme colour (hue slider) ----------
+  // recolours the hull stripes, pennants, emote circles and @mentions. Chatters' own name colours are never changed.
+  const DEF_HUE = 19;   // burnt orange
+  const wrapHue = h => ((Math.round(h) % 360) + 360) % 360;
+  function hslLum(h, s, l){   // perceived brightness (0-255) of an hsl colour
+    s /= 100; l /= 100;
+    const k = n => (n + h / 30) % 12, a = s * Math.min(l, 1 - l);
+    const f = n => 255 * (l - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1)));
+    return 0.299 * f(0) + 0.587 * f(8) + 0.114 * f(4);
+  }
+  function applyHue(h, custom){
+    const r = document.documentElement.style;
+    if (!custom){ ['--hull','--hulltext','--stripe','--mention'].forEach(p => r.removeProperty(p)); return; }
+    h = wrapHue(h);
+    r.setProperty('--hull',     `hsl(${h} 62% 44%)`);
+    r.setProperty('--stripe',   `hsl(${h} 62% 37%)`);
+    r.setProperty('--hulltext', hslLum(h, 62, 44) > 140 ? '#241a12' : '#f4ecdc');
+    r.setProperty('--mention',  `hsl(${h} 70% 70%)`);
+  }
+  const HUE_SET = P.has('hue') && P.get('hue') !== '' && !isNaN(parseFloat(P.get('hue')));
+  const HUE = HUE_SET ? wrapHue(parseFloat(P.get('hue'))) : DEF_HUE;
+  applyHue(HUE, HUE_SET);
+  const chat = document.getElementById('chat');
+
+  // ---------- roles: who gets which icon ----------
+  // Highest role wins. Head Mod = Twitch's Lead Moderator badge, or anyone listed in headmods=.
+  const HEADMODS = new Set(get('headmods').toLowerCase().split(/[\s,]+/).map(s => s.replace(/^@/, '')).filter(Boolean));
+  const ROLE_ORDER = ['broadcaster','headmod','moderator','vip','artist','founder','subscriber','default'];
+  const ROLE = {   // color = icon glass / label colour, ink = text on the label, tag = show a label on the name flag
+    broadcaster:{ label:'Streamer', color:'#963232', ink:'#f4ecdc', tag:true  },
+    headmod:    { label:'Head Mod', color:'#b8933f', ink:'#1f1608', tag:true  },
+    moderator:  { label:'Mod',      color:'#3f7650', ink:'#f4ecdc', tag:true  },
+    vip:        { label:'VIP',      color:'#86406c', ink:'#f4ecdc', tag:true  },
+    artist:     { label:'Artist',   color:'#3f6587', ink:'#f4ecdc', tag:true  },
+    founder:    { label:'Founder',  color:'#2f7069', ink:'#f4ecdc', tag:true  },
+    subscriber: { label:'Sub',      color:'#62508f', ink:'#f4ecdc', tag:false },
+    default:    { label:'Chatter',  color:'',        ink:'#fff',    tag:false },
+  };
+  function roleOf(tags = [], login = ''){
+    const badges = tags.map(b => b.split('/')[0]);
+    if (badges.includes('broadcaster')) return 'broadcaster';
+    if (badges.some(b => /^lead[_-]?mod/.test(b)) || HEADMODS.has(login)) return 'headmod';
+    if (badges.includes('moderator')) return 'moderator';
+    if (badges.includes('vip')) return 'vip';
+    if (badges.includes('artist-badge')) return 'artist';
+    if (badges.includes('founder')) return 'founder';
+    if (badges.includes('subscriber')) return 'subscriber';
+    return 'default';
+  }
+
+  // ---------- Twitch badges (incl. the channel's own sub & bit badges) ----------
+  // Badge pictures come from IVR's public mirror of Twitch's badge lists (no login needed).
+  // If that can't be reached, the main global badges below still show.
+  // ---------- anchor + logo at the end of each boat line ----------
+  const DEFAULT_LOGO = 'data:image/png;base64,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';   // orange sailboat
+  const LOGO_URL = /^(https?:|data:image\/)/i.test(get('logo') || '') ? get('logo') : DEFAULT_LOGO;
+  const ANCHOR = on('anchor')
+    ? `<span class="anchor"><svg viewBox="0 0 24 30" fill="none" stroke-linecap="round" stroke-linejoin="round">` +
+      [['rgba(15,12,8,.85)', 4.4], ['#ece3cf', 2.3]].map(([c, w]) =>
+        `<g stroke="${c}" stroke-width="${w}"><circle cx="12" cy="4" r="2.6"/><path d="M12 6.6V27M7 10.5h10M3.5 19.5C4 24.5 8 27 12 27s8-2.5 8.5-7.5M3.5 19.5l-1.6 2.2M3.5 19.5l2.4.6M20.5 19.5l1.6 2.2M20.5 19.5l-2.4.6"/></g>`).join('') +
+      `</svg><img src="${String(LOGO_URL).replace(/"/g, '%22')}" alt="" onerror="this.remove()"></span>`
+    : '';
+  const SHOW_BADGES = on('badges');
+  const BADGE_CDN = id => `https://static-cdn.jtvnw.net/badges/v1/${id}/3`;
+  const FALLBACK_BADGE = {
+    broadcaster:    BADGE_CDN('5527c58c-fb7d-422d-b71b-f309dcb85cc1'),
+    moderator:      BADGE_CDN('3267646d-33f0-4b17-b3df-f923a41db1d0'),
+    vip:            BADGE_CDN('b817aba4-fad8-49e2-b88a-7cc744dfa6ec'),
+    subscriber:     BADGE_CDN('5d9f2208-5dd8-11e7-8513-2ff4adfae661'),
+    founder:        BADGE_CDN('511b78a9-ab37-472f-9569-457753bbe7d3'),
+    'artist-badge': BADGE_CDN('4300a897-03dc-4e83-8c0e-c332fee7057f'),
+    partner:        BADGE_CDN('d12a2e27-16f6-41d0-ab77-b780518f00a3'),
+    staff:          BADGE_CDN('d97c37bd-a6f5-4c38-8f57-4e4bef88af34'),
+  };
+  const GLOBAL_BADGES = new Map(), CHANNEL_BADGES = new Map();
+  function readBadgeSets(json, into){   // accepts the Helix-style list and the older {badge_sets:{...}} shape
+    let sets = Array.isArray(json) ? json : (json && (json.data || json.badge_sets || json.badges)) || [];
+    if (!Array.isArray(sets)) sets = Object.entries(sets).map(([set_id, v]) => ({ set_id, versions: v && v.versions }));
+    for (const st of sets){
+      const id = st && (st.set_id || st.setID || st.id); if (!id) continue;
+      let vers = st.versions || [];
+      if (!Array.isArray(vers)) vers = Object.entries(vers).map(([vid, v]) => ({ id: vid, ...v }));
+      vers.forEach((v, i) => {
+        const url = v && (v.image_url_4x || v.image_url_2x || v.image_url_1x || v.imageURL || v.image_url);
+        if (!url) return;
+        into.set(`${id}/${v.id}`, url);
+        if (i === 0) into.set(`${id}/*`, url);
+      });
+    }
+  }
+  async function loadBadges(login){
+    if (!SHOW_BADGES) return;
+    const j = url => fetch(url).then(r => r.ok ? r.json() : null).catch(() => null);
+    const [g, c] = await Promise.all([
+      j('https://api.ivr.fi/v2/twitch/badges/global'),
+      login ? j(`https://api.ivr.fi/v2/twitch/badges/channel?login=${encodeURIComponent(login)}`) : null,
+    ]);
+    if (g) readBadgeSets(g, GLOBAL_BADGES);
+    if (c) readBadgeSets(c, CHANNEL_BADGES);
+  }
+  function badgeUrl(tag){
+    const [set, ver = '1'] = tag.split('/');
+    return CHANNEL_BADGES.get(`${set}/${ver}`) || GLOBAL_BADGES.get(`${set}/${ver}`)
+        || CHANNEL_BADGES.get(`${set}/*`) || GLOBAL_BADGES.get(`${set}/*`) || FALLBACK_BADGE[set] || '';
+  }
+  function badgeImgs(tags){
+    if (!SHOW_BADGES) return '';
+    return tags.map(t => { const u = badgeUrl(t); return u ? `<img src="${esc(u)}" alt="" onerror="this.remove()">` : ''; }).join('');
+  }
+  // ---------- alert drawings (48x48) ----------
+  const BARREL = `<svg viewBox="0 0 48 48">
+    <path d="M14 6Q10 24 14 42H34Q38 24 34 6Z" fill="#9a6235" stroke="#4a2c14" stroke-width="1.2"/>
+    <path d="M19 6.4Q16.5 24 19 41.6M24 6.4V41.6M29 6.4Q31.5 24 29 41.6" stroke="#6e4322" stroke-width="1.1" fill="none"/>
+    <path d="M17 9Q14.4 24 17 39" stroke="#c48a55" stroke-width="1.8" fill="none" opacity=".55"/>
+    <path d="M12.6 10.6H35.4V13.4H12.6ZM12.1 19.6H35.9V22H12.1ZM12.1 26H35.9V28.4H12.1ZM12.6 34.6H35.4V37.4H12.6Z" fill="#3c4148"/>
+    <ellipse cx="24" cy="6" rx="10" ry="2.6" fill="#b57a45" stroke="#4a2c14" stroke-width="1.1"/></svg>`;
+  const CANNON = cls => `<g class="${cls}"><g class="cn">
+      <path d="M40 21 16 18.5Q13 18.3 13 21V25Q13 27.7 16 27.5L40 26Q43 23.5 40 21Z" fill="#5b646e" stroke="#1f2328" stroke-width="1.2"/>
+      <path d="M17 19.8 38 21.7" stroke="#9aa4ae" stroke-width="1.4" stroke-linecap="round"/>
+      <rect x="11.5" y="18" width="3" height="10" rx="1" fill="#6c7680" stroke="#1f2328" stroke-width="1"/>
+      <circle cx="42.5" cy="23.5" r="2.2" fill="#5b646e" stroke="#1f2328" stroke-width="1"/>
+      <path d="M22 26H40L38 33H25Z" fill="#a0663a" stroke="#3a2412"/>
+      <circle cx="33" cy="34" r="5.2" fill="#8a5a33" stroke="#3a2412" stroke-width="1.5"/><circle cx="33" cy="34" r="1.4" fill="#3a2412"/></g>
+    <circle class="flash" cx="7.5" cy="23" r="5.5" fill="#ffcf6b"/>
+    <circle class="puff" cx="5" cy="21" r="5" fill="#e4ddd0"/><circle class="puff p2" cx="3" cy="26" r="3.8" fill="#cfc7b8"/></g>`;
+  const CANNONS = `<svg viewBox="0 0 48 48"><g transform="translate(12 -6) scale(.72)">${CANNON('b2')}</g><g transform="translate(-6 4) scale(1.05)">${CANNON('b1')}</g></svg>`;
+  const BELL = `<svg viewBox="0 0 48 48">
+    <rect x="20.5" y="1.5" width="7" height="5" rx="1.5" fill="#5e4129"/>
+    <path d="M24 6C21.8 6 21 7.6 21 9V10.3C14.3 12 13.4 19 13.4 26 13.4 31 10.6 33.3 8.4 35.4H39.6C37.4 33.3 34.6 31 34.6 26 34.6 19 33.7 12 27 10.3V9C27 7.6 26.2 6 24 6Z" fill="#c9a24e" stroke="#7d6232" stroke-width="1.2"/>
+    <path d="M18 15Q16.6 21 16.6 28" stroke="#ecd38c" stroke-width="2" fill="none" stroke-linecap="round" opacity=".8"/>
+    <rect x="8" y="34.6" width="32" height="3" rx="1.2" fill="#a8843a"/>
+    <circle cx="24" cy="40.5" r="3.2" fill="#7d6232"/></svg>`;
+  const CHEST = `<svg viewBox="0 0 48 48">
+    <path d="M7 22V16Q24 6 41 16V22Z" fill="#9a6235" stroke="#4a2c14" stroke-width="1.2"/>
+    <rect x="7" y="22" width="34" height="18" rx="2" fill="#8a5a33" stroke="#4a2c14" stroke-width="1.2"/>
+    <path d="M7 22H41" stroke="#4a2c14" stroke-width="1.6"/>
+    <rect x="12" y="12.5" width="3.2" height="27.5" fill="#d4a63c"/><rect x="32.8" y="12.5" width="3.2" height="27.5" fill="#d4a63c"/>
+    <rect x="21.4" y="19.5" width="5.2" height="6.5" rx="1" fill="#e6bf55" stroke="#8a6a1f"/>
+    <path class="spark" d="M10 6l1.2 2.8L14 10l-2.8 1.2L10 14l-1.2-2.8L6 10l2.8-1.2z" fill="#ffe08a"/>
+    <path class="spark s2" d="M38 4l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z" fill="#ffe08a"/>
+    <path class="spark s3" d="M44 15l.8 1.8 1.8.8-1.8.8-.8 1.8-.8-1.8-1.8-.8 1.8-.8z" fill="#ffe08a"/></svg>`;
+  const EVENT_LOOK = {
+    Gift:  { cls:'gift', title:'Cargo aboard!',    art:BARREL },
+    Raid:  { cls:'raid', title:'Raiders inbound!', art:CANNONS },
+    Sub:   { cls:'sub',  title:'Welcome aboard',   art:BELL },
+    Prime: { cls:'sub',  title:'Welcome aboard',   art:BELL },
+    Bits:  { cls:'bits', title:'Treasure!',        art:CHEST },
+    Donation:{ cls:'bits', title:'Treasure!',      art:CHEST },   // YouTube Super Chat / other tips (via Social Stream Ninja)
+    Member:{ cls:'sub',  title:'Welcome aboard',   art:BELL },    // YouTube membership
+  };
+
+  // ---------- helpers ----------
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const PALETTE = ['#FF4D5E','#FF8A3D','#3DA5FF','#9ACD32','#FFC23D','#3BE36B','#B07CFF','#FF69B4','#00C2C7','#FF7AA6'];
+  function colorFor(name, given){
+    if (given) return given;
+    let h = 0; for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+    return PALETTE[h % PALETTE.length];
+  }
+  const rgb = hex => { const m = /^#?([0-9a-f]{6})$/i.exec(hex || ''); if (!m) return null; const n = parseInt(m[1], 16); return [n >> 16, (n >> 8) & 255, n & 255]; };
+  const lum = ([r,g,b]) => 0.299*r + 0.587*g + 0.114*b;
+  function mute(hex, sMax = .42, lMin = .4, lMax = .6){   // tone chatters' colours down so nothing looks neon
+    const c = rgb(hex); if (!c) return hex;
+    const [r, g, b] = c.map(v => v / 255), max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+    let h = 0, s = 0, l = (max + min) / 2;
+    if (d){
+      s = d / (1 - Math.abs(2 * l - 1));
+      h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+      h = (h * 60 + 360) % 360;
+    }
+    s = Math.min(s, sMax); l = Math.min(Math.max(l, lMin), lMax);
+    return `hsl(${h.toFixed(0)} ${(s * 100).toFixed(0)}% ${(l * 100).toFixed(0)}%)`;
+  }
+
+  // ---------- emotes ----------
+  const twitchEmote = id => `https://static-cdn.jtvnw.net/emoticons/v2/${encodeURIComponent(id)}/${ANIMATED ? 'default' : 'static'}/dark/3.0`;
+  let TP = new Map();   // third-party emote name -> image url
+
+  async function loadThirdParty(roomId){
+    const j = url => fetch(url).then(r => r.ok ? r.json() : null).catch(() => null);
+    const bttv = list => (list || []).map(e => [e.code, `https://cdn.betterttv.net/emote/${e.id}/2x`]);
+    const ffz  = list => (list || []).map(e => [e.code, e.images && (e.images['4x'] || e.images['2x'] || e.images['1x'])]);
+    const stv  = set  => ((set && set.emotes) || []).map(e => [e.name, e.data && e.data.host ? `https:${e.data.host.url}/2x.webp` : null]);
+    const jobs = [];   // order matters: globals first so channel emotes win name clashes
+    if (THIRD.has('bttv')) jobs.push(j('https://api.betterttv.net/3/cached/emotes/global').then(bttv));
+    if (THIRD.has('ffz'))  jobs.push(j('https://api.betterttv.net/3/cached/frankerfacez/emotes/global').then(ffz));
+    if (THIRD.has('7tv'))  jobs.push(j('https://7tv.io/v3/emote-sets/global').then(stv));
+    if (roomId){
+      if (THIRD.has('bttv')) jobs.push(j(`https://api.betterttv.net/3/cached/users/twitch/${roomId}`).then(d => bttv(d && [...(d.channelEmotes||[]), ...(d.sharedEmotes||[])])));
+      if (THIRD.has('ffz'))  jobs.push(j(`https://api.betterttv.net/3/cached/frankerfacez/users/twitch/${roomId}`).then(ffz));
+      if (THIRD.has('7tv'))  jobs.push(j(`https://7tv.io/v3/users/twitch/${roomId}`).then(d => stv(d && d.emote_set)));
+    }
+    const results = await Promise.all(jobs);
+    const m = new Map();
+    for (const list of results) for (const [name, url] of list) if (name && url) m.set(name, url);
+    TP = m;
+  }
+
+  // Split a message into text + emote tokens.
+  function tokenize(text, emotesTag){
+    const chars = Array.from(text);            // Twitch emote ranges count code points
+    const ranges = [];
+    if (emotesTag) for (const part of emotesTag.split('/')){
+      const [id, pos] = part.split(':'); if (!pos) continue;
+      for (const r of pos.split(',')){ const [a, b] = r.split('-').map(Number); ranges.push({ id, a, b }); }
+    }
+    ranges.sort((x, y) => x.a - y.a);
+    const tokens = [];
+    const pushText = s => {
+      if (!s) return;
+      if (EMOTE_MODE === 'text' || !TP.size) { tokens.push({ t:'s', s }); return; }
+      for (const part of s.split(/(\s+)/)){
+        if (!part) continue;
+        const url = TP.get(part);
+        tokens.push(url ? { t:'e', name:part, url } : { t:'s', s:part });
+      }
+    };
+    let i = 0;
+    for (const r of ranges){
+      if (r.a < i) continue;
+      pushText(chars.slice(i, r.a).join(''));
+      const name = chars.slice(r.a, r.b + 1).join('');
+      if (EMOTE_MODE === 'text') tokens.push({ t:'s', s:name });
+      else tokens.push({ t:'e', name, url: twitchEmote(r.id) });
+      i = r.b + 1;
+    }
+    pushText(chars.slice(i).join(''));
+    return tokens;
+  }
+
+  function renderInline(tokens){
+    const units = tokens.reduce((n, t) => n + (t.t === 'e' ? 1 : Array.from(t.s).length), 0);
+    const step = TYPING ? Math.min(30, 1100 / Math.max(units, 1)) : 0;
+    let html = '', n = 0;
+    const delay = () => TYPING ? ` style="animation-delay:${Math.round(140 + n++ * step)}ms"` : '';
+    for (const t of tokens){
+      if (t.t === 'e') html += `<img class="emote" alt="${esc(t.name)}" title="${esc(t.name)}" src="${esc(t.url)}"${delay()}>`;
+      else for (const part of t.s.split(/(@[A-Za-z0-9_]+)/)){
+        if (!part) continue;
+        const m = part.length > 1 && part[0] === '@';
+        if (TYPING) for (const ch of Array.from(part)) html += `<span class="ch${m ? ' mention' : ''}"${delay()}>${esc(ch)}</span>`;
+        else html += m ? `<span class="mention">${esc(part)}</span>` : esc(part);
+      }
+    }
+    return html;
+  }
+
+  function renderBig(emotes, tail = ''){
+    const shown = emotes.slice(0, EMOTE_MAX), extra = emotes.length - shown.length;
+    return `<div class="bigemotes">` +
+      shown.map((e, i) => `<div class="bigemote" style="animation-delay:${i * 90}ms"><img alt="${esc(e.name)}" title="${esc(e.name)}" src="${esc(e.url)}"></div>`).join('') +
+      (extra > 0 ? `<span class="more">+${extra}</span>` : '') + tail + `</div>`;
+  }
+
+  // ---------- platform icons (multistream) ----------
+  const PLATFORM_SVG = {
+    youtube:'<svg viewBox="0 0 24 24"><rect x="1.5" y="5" width="21" height="14" rx="4" fill="#ff0033"/><path d="M10 9v6l5.2-3z" fill="#fff"/></svg>',
+    twitch:'<svg viewBox="0 0 24 24"><path d="M4.5 2 2.5 6.5V20h5v2.5h2.8l2.5-2.5h4l4.7-4.7V2z" fill="#9146ff"/><path d="M5 4.5h14v9.8l-3 3h-4.6L9 19.6v-2.3H5z" fill="#fff"/><path d="M11 7.5h1.9v5H11zM15.5 7.5h1.9v5h-1.9z" fill="#9146ff"/></svg>',
+    kick:'<svg viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="20" rx="4" fill="#53fc18"/><path d="M7 6h3v4h1.4L13.5 7.5V6H17v3l-2 2.5 2 2.5V18h-3.5v-2.2l-2-2.3H10V18H7z" fill="#0b0e0f"/></svg>',
+  };
+  const platformIcon = p => PLATFORM_ICONS && PLATFORM_SVG[p] ? `<span class="plat">${PLATFORM_SVG[p]}</span>` : '';
+
+  // ---------- building messages ----------
+  function shell(classes, { login, display, color, badges = [], userId, id, platform = 'twitch', badgeUrls = null }){
+    let uc = colorFor(login, color);
+    uc = mute(uc, .55, .6, .76);   // softened, but bright enough to read over video
+    const el = document.createElement('div');
+    el.className = 'msg ' + classes;
+    el.dataset.id = id || '';
+    el.dataset.user = userId || login;
+    el.style.setProperty('--uc', uc);
+    el.style.setProperty('--bobd', (4 + Math.random() * 1.8).toFixed(2) + 's');   // boats bob out of sync
+    const role = roleOf(badges, login), R = ROLE[role];
+    el.dataset.role = role;
+    if (ANCHOR) el.classList.add('anc');
+    if (R.color){ el.style.setProperty('--rc', R.color); el.style.setProperty('--ri', R.ink); }
+    const badgeHtml = badgeUrls   // badges that came from another platform (already picture links)
+      ? (SHOW_BADGES ? badgeUrls.map(u => `<img src="${esc(u)}" alt="" onerror="this.remove()">`).join('') : '')
+      : badgeImgs(badges);
+    const tag = ROLE_TAGS && R.tag ? `<b class="role">${R.label}</b>` : '';
+    el.innerHTML = `<div class="name"><span class="nm">${platformIcon(platform)}${badgeHtml ? `<span class="badges">${badgeHtml}</span>` : ''}${esc(display || login)}${tag}</span></div>`;
+    return el;
+  }
+  function push(el){
+    chat.appendChild(el);
+    while (chat.children.length > MAX) chat.firstElementChild.remove();
+    if (FADE > 0) setTimeout(() => removeEl(el), FADE * 1000);
+  }
+  function removeEl(el){
+    if (!el.isConnected || el.classList.contains('out')) return;
+    el.classList.add('out');
+    setTimeout(() => el.remove(), 750);
+  }
+
+  function addMessage(m){
+    if (BOTS.has(m.login)) return;
+    if (HIDE_CMDS && m.text.trim().startsWith('!')) return;
+    const tokens = m.tokens || tokenize(m.text, m.emotes);
+    const emotes = tokens.filter(t => t.t === 'e');
+    const emoteOnly = EMOTE_MODE === 'bubble' && emotes.length > 0 &&
+                      tokens.every(t => t.t === 'e' || !t.s.trim());
+    const el = shell((m.action ? 'action ' : '') + (emoteOnly ? 'emoteonly ' : '') + (TYPING ? 'typing' : ''), m);
+    const content = emoteOnly ? renderBig(emotes, ANCHOR)
+                              : `<div class="body"><span class="dot"></span>${renderInline(tokens)}${ANCHOR}</div>`;
+    el.insertAdjacentHTML('beforeend', `<div class="row">${content}</div>`);
+    push(el);
+  }
+
+  function addEvent(m, kind, info){
+    if (!EVENTS || BOTS.has(m.login)) return;
+    const look = EVENT_LOOK[kind] || EVENT_LOOK.Sub;
+    const el = shell('event ev-' + look.cls, m);
+    el.classList.remove('anc');   // alerts are their own card: no flag, hull or anchor
+    const text = info.charAt(0).toLowerCase() + info.slice(1);
+    el.innerHTML = `<div class="evart">${look.art}</div>` +
+      `<div class="evtext"><div class="evtitle">${esc(look.title)}</div>` +
+      `<div class="evline"><span class="evname">${esc(m.display || m.login)}</span> ${esc(text)}</div></div>`;
+    push(el);
+  }
+
+  // ---------- Twitch IRC ----------
+  const unescapeTag = v => v.replace(/\\(.)/g, (_, c) => ({ s:' ', ':':';', '\\':'\\', r:'\r', n:'\n' }[c] ?? c));
+  function parse(line){
+    const msg = { tags:{}, prefix:'', command:'', params:[], trailing:null };
+    if (line[0] === '@'){
+      const sp = line.indexOf(' ');
+      for (const kv of line.slice(1, sp).split(';')){
+        const e = kv.indexOf('=');
+        if (e < 0) msg.tags[kv] = ''; else msg.tags[kv.slice(0, e)] = unescapeTag(kv.slice(e + 1));
+      }
+      line = line.slice(sp + 1);
+    }
+    if (line[0] === ':'){ const sp = line.indexOf(' '); msg.prefix = line.slice(1, sp); line = line.slice(sp + 1); }
+    const t = line.indexOf(' :');
+    if (t >= 0){ msg.trailing = line.slice(t + 2); line = line.slice(0, t); }
+    const parts = line.split(' ');
+    msg.command = parts[0]; msg.params = parts.slice(1);
+    return msg;
+  }
+  const userOf = m => ({
+    id: m.tags.id, userId: m.tags['user-id'],
+    login: (m.tags.login || m.prefix.split('!')[0] || '').toLowerCase(),
+    display: m.tags['display-name'], color: m.tags.color,
+    badges: (m.tags.badges || '').split(',').filter(Boolean),   // raw "set/version", e.g. subscriber/12
+  });
+
+  const giftSkip = {};   // hides the individual "gifted a sub to X" lines after a "gifted 20 subs"
+  let roomLoaded = false;
+
+  function handleUserNotice(m){
+    const t = m.tags, u = userOf(m), kind = t['msg-id'];
+    const plural = (n, w) => `${n} ${w}${n == 1 ? '' : 's'}`;
+    switch (kind){
+      case 'sub': case 'resub': {
+        const months = +t['msg-param-cumulative-months'] || 1;
+        addEvent(u, t['msg-param-sub-plan'] === 'Prime' ? 'Prime' : 'Sub',
+                 months > 1 ? `Subscribed · ${months} months` : 'Just subscribed');
+        break;
+      }
+      case 'subgift': case 'anonsubgift': {
+        if (giftSkip[u.login] > 0){ giftSkip[u.login]--; return; }
+        addEvent(u, 'Gift', `Gifted a sub to ${t['msg-param-recipient-display-name'] || 'someone'}`);
+        break;
+      }
+      case 'submysterygift': case 'anonsubmysterygift': {
+        const n = +t['msg-param-mass-gift-count'] || 1;
+        giftSkip[u.login] = (giftSkip[u.login] || 0) + n;
+        addEvent(u, 'Gift', `Gifted ${plural(n, 'sub')}`);
+        break;
+      }
+      case 'giftpaidupgrade': case 'anongiftpaidupgrade':
+        addEvent(u, 'Sub', 'Continuing their gift sub'); break;
+      case 'raid':
+        addEvent(u, 'Raid', `Raided with ${plural(+t['msg-param-viewerCount'] || 0, 'viewer')}`); break;
+      default: return;
+    }
+    if (m.trailing) addMessage({ ...u, id: u.id + '-msg', text: m.trailing, emotes: t.emotes });
+  }
+
+  // ---------- multistream: chat from YouTube etc. via Social Stream Ninja ----------
+  // Messages arrive as small bits of HTML. Only plain text and emote pictures are kept — nothing else from them is ever run or shown.
+  function htmlToTokens(html, textonly){
+    if (textonly || !/[<&]/.test(html)) return tokenize(html, '');
+    const doc = new DOMParser().parseFromString(`<div>${html}</div>`, 'text/html');
+    const tokens = [];
+    const walk = node => {
+      for (const n of node.childNodes){
+        if (n.nodeType === 3) tokens.push(...tokenize(n.textContent, ''));
+        else if (n.nodeName === 'IMG'){
+          const src = n.getAttribute('src') || '', alt = n.getAttribute('alt') || '';
+          if (EMOTE_MODE !== 'text' && /^(https?:|data:image\/)/i.test(src)) tokens.push({ t:'e', name:alt, url:src });
+          else if (alt) tokens.push({ t:'s', s:alt });
+        }
+        else if (n.nodeType === 1 && !/^(SCRIPT|STYLE)$/.test(n.nodeName)) walk(n);
+      }
+    };
+    walk(doc.body.firstElementChild || doc.body);
+    return tokens;
+  }
+  function handleSSN(d){
+    if (Array.isArray(d)) return d.forEach(handleSSN);
+    if (!d || typeof d !== 'object') return;
+    if (d.overlayNinja && typeof d.overlayNinja === 'object') d = d.overlayNinja;
+    if (d.chatname === undefined && d.chatmessage === undefined) return;
+    const platform = String(d.type || 'chat').toLowerCase();
+    if (CHANNEL && platform === 'twitch') return;   // Twitch already comes in directly, with badges and alerts
+    const display = String(d.chatname || '').trim() || 'someone';
+    const login = display.toLowerCase();
+    const tags = [];
+    if (d.host) tags.push('broadcaster/1');
+    if (d.mod) tags.push('moderator/1');
+    if (d.vip) tags.push('vip/1');
+    if (d.membership) tags.push('subscriber/0');
+    const badgeUrls = (Array.isArray(d.chatbadges) ? d.chatbadges : [])
+      .map(b => typeof b === 'string' ? b : (b && (b.src || b.url)))
+      .filter(u => typeof u === 'string' && /^(https?:|data:image\/)/i.test(u));
+    const u = { id:'ssn-' + (d.id ?? Math.random()), userId:login, login, display, platform, badges:tags, badgeUrls,
+                color: /^#[0-9a-f]{6}$/i.test(d.nameColor || '') ? d.nameColor : '' };
+    if (d.hasDonation) addEvent(u, 'Donation', platform.startsWith('youtube') ? `Sent a ${d.hasDonation} Super Chat` : `Sent ${d.hasDonation}`);
+    else if (d.event){
+      if (/member|sponsor/i.test(String(d.event))) addEvent(u, 'Member', 'Became a member');
+      return;   // other system events (follows, joins, likes...) are skipped
+    }
+    const html = String(d.chatmessage || '');
+    if (!html.trim()) return;
+    const tokens = htmlToTokens(html, d.textonly);
+    addMessage({ ...u, tokens, text: tokens.map(t => t.t === 'e' ? t.name : t.s).join('') });
+  }
+  let ssnBackoff = 1000;
+  function connectSSN(){
+    let sock;
+    try { sock = new WebSocket(`wss://io.socialstream.ninja/join/${encodeURIComponent(SSN)}/4`); } catch { return; }
+    sock.onopen = () => { ssnBackoff = 1000; };
+    sock.onmessage = ev => { let d; try { d = JSON.parse(ev.data); } catch { return; } handleSSN(d); };
+    sock.onclose = () => { setTimeout(connectSSN, ssnBackoff); ssnBackoff = Math.min(ssnBackoff * 2, 30000); };
+  }
+
+  let ws, backoff = 1000;
+  function connect(){
+    ws = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
+    ws.onopen = () => {
+      backoff = 1000;
+      ws.send('CAP REQ :twitch.tv/tags twitch.tv/commands');
+      ws.send('PASS SCHMOOPIIE');
+      ws.send('NICK justinfan' + Math.floor(10000 + Math.random() * 80000));
+      ws.send('JOIN #' + CHANNEL);
+    };
+    ws.onmessage = ev => {
+      for (const line of ev.data.split('\r\n')){
+        if (!line) continue;
+        const m = parse(line);
+        switch (m.command){
+          case 'PING': ws.send('PONG :' + (m.trailing || 'tmi.twitch.tv')); break;
+          case 'ROOMSTATE':
+            if (!roomLoaded && m.tags['room-id'] && EMOTE_MODE !== 'text' && THIRD.size){ roomLoaded = true; loadThirdParty(m.tags['room-id']); }
+            break;
+          case 'PRIVMSG': {
+            let text = m.trailing || '', action = false;
+            const am = /^\u0001ACTION (.*)\u0001$/.exec(text);
+            if (am){ text = am[1]; action = true; }
+            const u = userOf(m);
+            if (m.tags.bits) addEvent(u, 'Bits', `Cheered ${m.tags.bits} bits`);
+            addMessage({ ...u, text, emotes: m.tags.emotes, action });
+            break;
+          }
+          case 'USERNOTICE': handleUserNotice(m); break;
+          case 'CLEARMSG': {
+            const id = m.tags['target-msg-id'];
+            chat.querySelectorAll('.msg').forEach(el => { if (el.dataset.id === id || el.dataset.id === id + '-msg') removeEl(el); });
+            break;
+          }
+          case 'CLEARCHAT': {
+            const uid = m.tags['target-user-id'];
+            chat.querySelectorAll('.msg').forEach(el => { if (!m.trailing || el.dataset.user === uid) removeEl(el); });
+            break;
+          }
+          case 'RECONNECT': ws.close(); break;
+        }
+      }
+    };
+    ws.onclose = () => { setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 30000); };
+  }
+
+  // ---------- preview mode: demo chat + settings panel ----------
+  function demo(){
+    document.body.classList.add('demo');
+    document.body.style.setProperty('--previewbg', P.get('bg') || DEF_BG);
+    const E = { Kappa:25, LUL:425618, SeemsGood:64138, HeyGuys:30259, Kreygasm:41, BibleThump:86, NotLikeThis:58765, CoolCat:58127 };
+    const emoteTag = str => {
+      const map = {}; let pos = 0;
+      for (const w of str.split(' ')){
+        const len = Array.from(w).length;
+        if (E[w]) (map[E[w]] ||= []).push(`${pos}-${pos + len - 1}`);
+        pos += len + 1;
+      }
+      return Object.entries(map).map(([id, r]) => `${id}:${r.join(',')}`).join('/');
+    };
+    const people = {
+      seven:['Seven','#FF4D5E',[]], jasmine:['Jasmine','#FFB13B',['subscriber/6']],
+      olive:['Olive','#3BE36B',['artist-badge/1']], sayonani:['Sayonani','#FF4D5E',['vip/1','subscriber/3']],
+      bunny:['WhiteBunny','#FFFFFF',['broadcaster/1','subscriber/0']], judge:['JudgeGavel','#FFD23F',['moderator/1','subscriber/12']],
+      carrot:['carrotcake','#9ACD32',['founder/0']], lurker:['lurker_404','#7A6BFF',['premium/1']],
+      mate:['FirstMate','#00C2C7',['lead_moderator/1','subscriber/24']],
+      ytsailor:['DeckhandDana','#ff4e45',[],'youtube'], ytfan:['HarbourHank','#3ea6ff',['subscriber/0'],'youtube'],
+    };
+    const script = [
+      ['m','seven','LUL that play was actually 200 IQ'],
+      ['g','jasmine','Gift','Gifted 64 subs'],
+      ['m','jasmine','Kreygasm Kreygasm Kreygasm Kreygasm Kreygasm Kreygasm Kreygasm Kreygasm'],
+      ['m','olive','First'],
+      ['m','sayonani','Is this ranked or unranked?'],
+      ['m','bunny','welcome aboard everyone HeyGuys grab a life jacket'],
+      ['m','judge','keep it cozy on deck SeemsGood'],
+      ['m','mate','all hands on deck, stream is starting!'],
+      ['g','carrot','Sub','Subscribed · 12 months'],
+      ['m','carrot','a whole year of bunny streams BibleThump'],
+      ['a','lurker','waves from the back row'],
+      ['m','seven','NotLikeThis NotLikeThis'],
+      ['g','lurker','Raid','Raided with 42 viewers'],
+      ['g','judge','Bits','Cheered 500 bits'],
+      ['m','olive','drew a little bunny for the stream CoolCat'],
+    ];
+    if (MULTI) script.splice(1, 0, ['m','ytsailor','hello from YouTube!'], ['g','ytfan','Donation','Sent $5.00'], ['m','ytfan','love the boats on both streams']);
+    let n = 0;
+    const tick = () => {
+      const [type, who, a, b] = script[n % script.length];
+      const [display, color, badges, platform = 'twitch'] = people[who];
+      const u = { id:'d' + n, userId:who, login:display.toLowerCase(), display, color, badges, platform };
+      n++;
+      if (type === 'g') addEvent(u, a, b);
+      else addMessage({ ...u, text:a, emotes:emoteTag(a), action:type === 'a' });
+    };
+    for (let i = 0; i < 5; i++) tick();
+    setInterval(tick, 2200);
+    buildPanel();
+  }
+
+  function buildPanel(){
+    const cur = k => k === 'channel' ? (P.get('setupchannel') || '') : k === 'ssn' ? (P.get('setupssn') || '') : k === 'bg' ? (P.get('bg') || DEF_BG)
+              : ['bttv','ffz','7tv'].includes(k) ? (THIRD.has(k) ? '1' : '0') : get(k);
+    const sel = (k, opts) => `<select data-k="${k}">${opts.map(([v, l]) => `<option value="${v}"${cur(k) === v ? ' selected' : ''}>${l}</option>`).join('')}</select>`;
+    const chk = k => `<input type="checkbox" data-k="${k}"${cur(k) !== '0' ? ' checked' : ''}>`;
+    const txt = (k, ph = '') => `<input type="text" data-k="${k}" value="${esc(cur(k))}" placeholder="${ph}">`;
+    const num = (k, min, max) => `<input type="number" data-k="${k}" min="${min}" max="${max}" value="${esc(cur(k))}">`;
+    const rng = (k, min, max, step) => `<span class="rv"><input type="range" data-k="${k}" min="${min}" max="${max}" step="${step}" value="${esc(cur(k))}"><output>${esc(cur(k))}</output></span>`;
+    const row = (label, ctl) => `<label><span>${label}</span>${ctl}</label>`;
+
+    const panel = document.createElement('div');
+    panel.id = 'panel';
+    panel.innerHTML = `
+      <h2>Chat overlay settings <button class="x" title="Hide panel">&times;</button></h2>
+      <p>The chat on the left is a live preview with fake messages.</p>
+      <fieldset><legend>Basics</legend>
+        ${row('Your channel', txt('channel', 'yourname'))}
+        ${row('Side', sel('side', [['left','Left'],['right','Right']]))}
+        ${row('Theme colour', `<span class="rv"><input type="range" class="hue" data-k="hue" min="0" max="359" step="1" value="${HUE}"${HUE_SET ? ' data-touched="1"' : ''}><i class="sw"></i></span>`)}
+        <label><span></span><button class="link" type="button" data-reset-hue>Reset to default colours</button></label>
+        ${row('Overall size', rng('scale', .6, 2, .05))}
+        ${row('Max messages', num('max', 1, 50))}
+        ${row('Fade after (sec, 0 = never)', num('fade', 0, 600))}
+      </fieldset>
+      <fieldset><legend>Emotes</legend>
+        ${row('Emote style', sel('emotes', [['bubble','Solo emotes: big, own look'],['inline','Always text-sized'],['text','Names only, no images']]))}
+        ${row('Emote size', rng('emotesize', .5, 2.5, .05))}
+        ${row('Solo emotes shown before +N', num('emotemax', 1, 12))}
+        ${row('Circle behind solo emotes', chk('emotering'))}
+        ${row('Animated Twitch emotes', chk('animated'))}
+        ${row('BetterTTV emotes', chk('bttv'))}
+        ${row('FrankerFaceZ emotes', chk('ffz'))}
+        ${row('7TV emotes', chk('7tv'))}
+      </fieldset>
+      <fieldset><legend>Extras</legend>
+        ${row('Typing animation', chk('typing'))}
+        ${row('Twitch badges (incl. sub badges)', chk('badges'))}
+        ${row('Anchor + logo on each line', chk('anchor'))}
+        ${row('Your own logo (image link)', txt('logo', 'empty = sailboat'))}
+        ${row('Role names on name tags', chk('roles'))}
+        ${row('Extra head mods', txt('headmods', 'name1, name2'))}
+        ${row('Bobbing boats', chk('bob'))}
+        ${row('Portholes on the hull', chk('portholes'))}
+        ${row('Subs, gifts &amp; raids', chk('events'))}
+        ${row('Hide !commands', chk('hidecmds'))}
+        ${row('Hidden bots', txt('bots'))}
+      </fieldset>
+      <p style="margin-top:8px">Sub and bit badges come from your channel automatically — type your channel above to preview them. Head Mod = Twitch's Lead Moderator badge, plus anyone in Extra head mods.</p>
+      <fieldset><legend>Multistream (YouTube + more)</legend>
+        ${row('Social Stream Ninja session', txt('ssn', 'session ID'))}
+        ${row('Platform icons on names', chk('platformicons'))}
+        <p style="margin-top:6px">Optional. Shows YouTube (and Kick, etc.) chat in the same boats. Use the free <b>Social Stream Ninja</b> tool (socialstream.ninja) with your YouTube chat open, turn on <b>Global settings → Mechanics → "Enable remote API control of extension"</b> and <b>"Send chat messages to API server"</b>, then paste its session ID here. Leave empty if you only stream on Twitch.</p>
+      </fieldset>
+      <fieldset><legend>Preview only</legend>
+        ${row('Preview background', `<input type="color" data-k="bg" value="${esc(cur('bg'))}">`)}
+      </fieldset>
+      <fieldset><legend>Your OBS URL</legend>
+        <textarea readonly></textarea>
+        <div class="warn"></div>
+        <button class="btn" data-copy="url">Copy OBS URL</button>
+        <button class="btn btn2" data-copy="widget">Copy widget code (Pogly etc.)</button>
+        <p class="widgetnote" style="margin-top:6px"></p>
+      </fieldset>`;
+    document.body.appendChild(panel);
+    const gear = document.createElement('button');
+    gear.id = 'gear'; gear.textContent = 'Settings';
+    document.body.appendChild(gear);
+    panel.querySelector('.x').onclick = () => { panel.classList.add('hidden'); gear.classList.add('show'); };
+    gear.onclick = () => { panel.classList.remove('hidden'); gear.classList.remove('show'); };
+
+    const collect = () => {
+      const v = {};
+      panel.querySelectorAll('[data-k]').forEach(i => { v[i.dataset.k] = i.type === 'checkbox' ? (i.checked ? '1' : '0') : i.value.trim(); });
+      v.thirdparty = ['bttv','ffz','7tv'].filter(k => v[k] === '1').join(',') || '0';
+      if (!hueInput.dataset.touched) delete v.hue;   // untouched slider = default colours
+      return v;
+    };
+    const hueInput = panel.querySelector('input.hue');
+    const params = (v, preview) => {
+      const q = new URLSearchParams();
+      const ch = (v.channel || '').toLowerCase().replace(/^#/, '').replace(/^https?:\/\/(www\.)?twitch\.tv\//, '').replace(/[^a-z0-9_]/g, '');
+      if (!preview && ch) q.set('channel', ch);
+      for (const k in DEF) if (v[k] !== undefined && v[k] !== '' && v[k] !== DEF[k]) q.set(k, v[k]);
+      if (v.hue !== undefined) q.set('hue', v.hue);
+      if (preview){ if (ch) q.set('setupchannel', ch); if (v.bg && v.bg.toLowerCase() !== DEF_BG) q.set('bg', v.bg);
+        if (q.has('ssn')){ q.set('setupssn', q.get('ssn')); q.delete('ssn'); } }   // the preview never connects for real
+      return { q, ch };
+    };
+    const base = location.href.split('#')[0].split('?')[0];
+    const out = panel.querySelector('textarea'), warn = panel.querySelector('.warn');
+    const refreshUrl = () => {
+      const { q, ch } = params(collect(), false);
+      out.value = base + (q.toString() ? '?' + q : '');
+      warn.textContent = (ch || q.has('ssn')) ? '' : 'Type your channel name above so the overlay knows whose chat to show.';
+    };
+    refreshUrl();
+    panel.addEventListener('input', e => {
+      if (e.target === hueInput){            // recolour live while dragging
+        hueInput.dataset.touched = '1';
+        applyHue(+hueInput.value, true);
+      } else if (e.target.type === 'range') e.target.nextElementSibling.textContent = e.target.value;
+      refreshUrl();
+    });
+    panel.addEventListener('change', e => {   // re-run the preview with the new look
+      if (!e.target.dataset.k) return;
+      const { q } = params(collect(), true);
+      if (e.target === hueInput){             // already applied live: just remember it, no reload
+        history.replaceState(null, '', '?' + q);
+        return;
+      }
+      location.search = q.toString();
+    });
+    panel.querySelector('[data-reset-hue]').onclick = () => {
+      delete hueInput.dataset.touched;
+      hueInput.value = DEF_HUE;
+      applyHue(DEF_HUE, false);
+      refreshUrl();
+      const { q } = params(collect(), true);
+      history.replaceState(null, '', '?' + q);
+    };
+    // widget code for tools that take custom HTML (Pogly, etc.): loads this overlay, see-through, filling the widget box
+    const widgetCode = () =>
+      `<iframe src="${out.value.replace(/"/g, '%22')}" allowtransparency="true" scrolling="no" ` +
+      `style="position:absolute;inset:0;width:100%;height:100%;border:0;background:transparent;color-scheme:normal;overflow:hidden"></iframe>`;
+    const note = panel.querySelector('.widgetnote');
+    note.textContent = location.protocol === 'file:'
+      ? 'Widget code only works from your online link (e.g. GitHub Pages), not from a file on your computer.'
+      : 'Paste the widget code into a new HTML widget, then size the widget box (about 460 × 760).';
+    panel.querySelectorAll('[data-copy]').forEach(btn => btn.onclick = async () => {
+      const text = btn.dataset.copy === 'widget' ? widgetCode() : out.value;
+      const label = btn.textContent;
+      try { await navigator.clipboard.writeText(text); }
+      catch {
+        const t = document.createElement('textarea'); t.value = text; document.body.appendChild(t);
+        t.select(); document.execCommand('copy'); t.remove();
+      }
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = label, 1500);
+    });
+  }
+
+  // Inside OBS the page is always see-through: no preview background, no settings panel.
+  const IN_OBS = !!window.obsstudio;
+  loadBadges(CHANNEL || (P.get('setupchannel') || '').toLowerCase());
+  if (CHANNEL || SSN){
+    if (CHANNEL) connect();
+    if (SSN) connectSSN();
+  }
+  else if (IN_OBS){
+    const n = document.createElement('div');
+    n.id = 'obsnote';
+    n.innerHTML = 'Chat overlay: no channel (or multistream session) set yet.<br>Open this link in a normal browser, type your channel, press <b>Copy OBS URL</b>, and paste that into this source instead.';
+    document.body.appendChild(n);
+  }
+  else demo();
+})();
+</script>
+</body>
+</html>
